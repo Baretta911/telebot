@@ -1,14 +1,13 @@
 require('dotenv').config();
 
 // Bot Telegram dengan fitur produk & transaksi
-// Install dependencies: node-telegram-bot-api, lowdb, pdfkit, node-html-to-image
+// Install dependencies: node-telegram-bot-api, lowdb, pdfkit
 
 const TelegramBot = require('node-telegram-bot-api');
 const PDFDocument = require('pdfkit');
 const { Low } = require('lowdb');
 const { JSONFile } = require('lowdb/node');
 const fs = require('fs');
-const nodeHtmlToImage = require('node-html-to-image');
 
 // Ganti dengan token bot Anda
 const TOKEN = process.env.BOT_TOKEN || 'REPLACE_WITH_TOKEN';
@@ -130,52 +129,76 @@ function safeMarkdown(txt='') {
   return String(txt).replace(/([_*\[\]()~`>#+=|{}.!-])/g,'\\$1');
 }
 
-// ==== Helper Generate Nota & Callback Guard (tambahkan di atas handler callback) ===
-function generateNotaImage(t, idx) {
-  const items = (t.items && Array.isArray(t.items) && t.items.length) ? t.items : [{ qty: t.qty || 1, name: t.product || '-', price: t.price || 0, subtotal: t.total || t.price || 0 }];
-  const rows = items.map(it => `<tr><td style='text-align:center;border:1px solid #bdbdbd;'>${it.qty}</td><td style='border:1px solid #bdbdbd;'>${it.name}</td><td style='text-align:right;border:1px solid #bdbdbd;'>Rp${(it.price||0).toLocaleString('id-ID')}</td><td style='text-align:right;border:1px solid #bdbdbd;'>Rp${(it.subtotal||0).toLocaleString('id-ID')}</td></tr>`).join('');
-  const total = (t.total != null) ? t.total : items.reduce((a,b)=>a+(b.subtotal||0),0);
-  const html = `\n    <div style='width:340px;min-height:420px;padding:10px 8px 8px 8px;font-family:sans-serif;background:#fff;border:1px solid #eee;'>\n      <div style='font-size:22px;font-weight:bold;color:#1a237e;'>LALA SNACK</div>\n      <div style='font-size:10px;color:#000;margin-bottom:2px;'>MELAYANI PEMESANAN</div>\n      <div style='font-size:9px;color:#000;'>Alamat: Jin M.yusup A3 Jetis Rt 01/rw 14;<br>Growong Pucungrejo Muntilan Magelang<br>No Hp: 081568279340</div>\n      <div style='margin:4px 0 2px 0;font-size:9px;color:#000;'>Kepada: <b>${t.buyer || '-'}</b> <span style='float:right;'>No: TRX-${String(idx + 1).padStart(4,'0')}</span></div>\n      <hr style='border:1px solid #1a237e;margin:2px 0 4px 0;'>\n      <table style='width:100%;font-size:9px;border-collapse:collapse;margin-bottom:4px;'>\n        <tr style='color:#1a237e;font-weight:bold;background:#e3eafc;'>\n          <td style='width:40px;text-align:center;border:1px solid #bdbdbd;'>Banyaknya</td>\n          <td style='width:110px;border:1px solid #bdbdbd;'>Nama Barang</td>\n          <td style='width:70px;text-align:right;border:1px solid #bdbdbd;'>Harga Barang</td>\n          <td style='width:70px;text-align:right;border:1px solid #bdbdbd;'>Jumlah</td>\n        </tr>\n        ${rows}\n      </table>\n      <div style='border-top:1px solid #1a237e;margin:4px 0;'></div>\n      <div style='font-size:11px;font-weight:bold;color:#1a237e;text-align:right;margin-bottom:2px;'>TOTAL Rp. <span style='font-size:12px;'>${total.toLocaleString('id-ID')}</span></div>\n      <div style='font-size:8px;color:#000;margin-top:8px;'>Barang yang sudah 1 minggu tidak diambil rusak/hilang bukan tanggung jawab kami</div>\n      <div style='font-size:9px;color:#1a237e;margin-top:8px;float:left;'>Melayani Antar Jemput</div>\n      <div style='font-size:9px;color:#000;float:right;'>Hormat Kami,</div>\n      <div style='clear:both;'></div>\n    </div>\n  `;
-  return nodeHtmlToImage({ html, type: 'jpeg', quality: 70, encoding: 'binary' }).then(bin => Buffer.from(bin, 'binary'));
+// ==== Helper Generate Nota PDF (58mm thermal printer) ====
+function generateNotaPDF(t, idx) {
+  return new Promise((resolve, reject) => {
+    // 58mm = ~164 pts, dengan margin kecil
+    const doc = new PDFDocument({ 
+      size: [164, 600], // lebar 58mm, tinggi auto
+      margin: 8 
+    });
+    const filePath = `nota_lala_${idx+1}.pdf`;
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
+    
+    // Header
+    doc.fontSize(12).text('LALA SNACK', { align: 'center' });
+    doc.fontSize(7).text('MELAYANI PEMESANAN', { align: 'center' });
+    doc.fontSize(6).text('Jin M.yusup A3 Jetis Rt 01/rw 14', { align: 'center' });
+    doc.fontSize(6).text('Growong Pucungrejo Muntilan', { align: 'center' });
+    doc.fontSize(6).text('Magelang - 081568279340', { align: 'center' });
+    doc.fontSize(6).text('================================', { align: 'center' });
+    
+    // Info transaksi
+    doc.fontSize(7).text(`Kepada: ${t.buyer || '-'}`);
+    doc.fontSize(7).text(`No: TRX-${String(idx + 1).padStart(4,'0')}`);
+    doc.fontSize(7).text(`Tanggal: ${new Date().toLocaleDateString('id-ID')}`);
+    doc.fontSize(6).text('--------------------------------', { align: 'center' });
+    
+    // Items
+    const items = (t.items && Array.isArray(t.items) && t.items.length) ? t.items : [{ qty: t.qty || 1, name: t.product || '-', price: t.price || 0, subtotal: t.total || t.price || 0 }];
+    items.forEach((it, i) => {
+      doc.fontSize(7).text(`${it.name}`);
+      doc.fontSize(6).text(`  ${it.qty} x ${it.price.toLocaleString('id-ID')} = ${it.subtotal.toLocaleString('id-ID')}`);
+    });
+    
+    doc.fontSize(6).text('--------------------------------', { align: 'center' });
+    
+    // Total
+    const total = (t.total != null) ? t.total : items.reduce((a,b)=>a+(b.subtotal||0),0);
+    doc.fontSize(8).text(`TOTAL: Rp ${total.toLocaleString('id-ID')}`, { align: 'center' });
+    doc.fontSize(6).text('================================', { align: 'center' });
+    
+    // Footer
+    doc.fontSize(5).text('Barang 1 minggu tidak diambil');
+    doc.fontSize(5).text('rusak/hilang bukan tanggung jawab kami');
+    doc.fontSize(6).text('Melayani Antar Jemput');
+    doc.fontSize(6).text('Hormat Kami,', { align: 'center' });
+    
+    doc.end();
+    stream.on('finish', () => resolve(filePath));
+    stream.on('error', reject);
+  });
 }
-const answeredCallbacks = new Set();
-async function answerOnce(query, text='') { if (!query || answeredCallbacks.has(query.id)) return; try { await bot.answerCallbackQuery(query.id,{ text, show_alert:false }); } catch(_){} finally { answeredCallbacks.add(query.id); setTimeout(()=>answeredCallbacks.delete(query.id),60000); } }
-process.on('unhandledRejection',e=>console.warn('Unhandled rejection tertangkap:',e.message));
 
-// Agar server tetap berjalan walau ada error tak tertangkap
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
-
-// Graceful shutdown (Ctrl+C)
-process.on('SIGINT', () => {
-  console.log('Bot dihentikan dengan SIGINT (Ctrl+C)');
-  process.exit(0);
-});
-
-// === Ganti seluruh multiple handler callback_query menjadi satu handler tunggal ===
-// HAPUS handler callback_query lama di bawah dan gunakan yang ini
 bot.on('callback_query', async (query) => {
   try {
     const chatId = query.message?.chat?.id;
     const data = query.data;
     if (!chatId || !botActive) return;
     if (userState[chatId]) userState[chatId].lastActive = Date.now();
-    // Skip query terlalu lama (>15s sejak pesan tombol dikirim)
-    const ageOk = query.message?.date ? (Date.now() - query.message.date*1000) < 15000 : true;
-    if (!ageOk) return;
-    await answerOnce(query,'⏳');
     await db.read();
     // === Cetak nota (print_trans_) ===
     if (data.startsWith('print_trans_')) {
       const idx = parseInt(data.split('_')[2]);
       const t = db.data.transactions[idx];
       if (!t) return bot.sendMessage(chatId,'❌ Transaksi tidak ditemukan.');
-      let phId=null; try { const ph= await bot.sendMessage(chatId,`🖨️ Membuat nota transaksi #${idx+1} ...`); phId=ph.message_id; } catch{}
+      let phId=null; try { const ph= await bot.sendMessage(chatId,`🖨️ Membuat nota transaksi #${idx+1} (PDF) ...`); phId=ph.message_id; } catch{}
       try {
-        const buffer = await generateNotaImage(t, idx);
-        await bot.sendPhoto(chatId, buffer, { caption:`✅ Nota Transaksi #${idx+1}\nTotal: Rp${(t.total||0).toLocaleString('id-ID')}` }, { filename:`nota_lala_${idx+1}.jpg`, contentType:'image/jpeg' });
-      } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota.'); }
+        const filePath = await generateNotaPDF(t, idx);
+        await bot.sendDocument(chatId, filePath, { caption:`✅ Nota Transaksi #${idx+1}\nTotal: Rp${(t.total||0).toLocaleString('id-ID')}` });
+        fs.unlinkSync(filePath); // hapus file setelah dikirim
+      } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota PDF.'); }
       finally { if (phId) { try { await bot.deleteMessage(chatId,phId);} catch{} } }
       return;
     }
@@ -184,11 +207,12 @@ bot.on('callback_query', async (query) => {
       const idx = parseInt(data.split('_')[3]);
       const t = db.data.transactions[idx];
       if (!t) return bot.sendMessage(chatId,'❌ Transaksi tidak ditemukan.');
-      let phId=null; try { const ph= await bot.sendMessage(chatId,`🔄 Membuat ulang nota #${idx+1} ...`); phId=ph.message_id; } catch{}
+      let phId=null; try { const ph= await bot.sendMessage(chatId,`🔄 Membuat ulang nota #${idx+1} (PDF) ...`); phId=ph.message_id; } catch{}
       try {
-        const buffer = await generateNotaImage(t, idx);
-        await bot.sendPhoto(chatId, buffer, { caption:`🖼️ Nota LALA SNACK #${idx+1}` }, { filename:`nota_lala_${idx+1}.jpg`, contentType:'image/jpeg' });
-      } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota.'); }
+        const filePath = await generateNotaPDF(t, idx);
+        await bot.sendDocument(chatId, filePath, { caption:`🖼️ Nota LALA SNACK #${idx+1}` });
+        fs.unlinkSync(filePath);
+      } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota PDF.'); }
       finally { if (phId) { try { await bot.deleteMessage(chatId,phId);} catch{} } }
       return;
     }
@@ -243,7 +267,7 @@ bot.on('callback_query', async (query) => {
     // === Lihat produk / transaksi / bantuan / kembali ===
     if (data === 'view_products') { const products=db.data.products; if(!products.length) return bot.sendMessage(chatId,'📦 *Daftar Produk Kosong*',{ parse_mode:'Markdown', ...mainMenu }); const list=products.map((p,i)=>`${i+1}. *${p.name}* - Rp${p.price.toLocaleString('id-ID')}`).join('\n'); return bot.sendMessage(chatId,`📦 *Daftar Produk* (${products.length})\n\n${list}`,{ parse_mode:'Markdown', ...mainMenu }); }
     if (data === 'view_transactions') { const trans=db.data.transactions; if(!trans.length) return bot.sendMessage(chatId,'📊 *Daftar Transaksi Kosong*',{ parse_mode:'Markdown', ...mainMenu }); const list=trans.map((t,i)=> t.items? `${i+1}. *${t.items.map(it=>`${it.name} x${it.qty}`).join(', ')}*\n   💰 Total: Rp${t.total.toLocaleString('id-ID')} | 👤 ${t.buyer}` : `${i+1}. *${t.product} x${t.qty}*\n   👤 ${t.buyer}`).join('\n\n'); return bot.sendMessage(chatId,`📊 *Daftar Transaksi* (${trans.length})\n\n${list}`,{ parse_mode:'Markdown', ...mainMenu }); }
-    if (data === 'help') { const helpMsg=`📚 *Panduan Penggunaan Bot Toko*\n\n• Tambah / Hapus Produk\n• Tambah / Hapus Transaksi\n• Cetak / Kirim Ulang Nota (JPG)\n• Lihat Produk & Transaksi`; return bot.sendMessage(chatId,helpMsg,{ parse_mode:'Markdown', ...mainMenu }); }
+    if (data === 'help') { const helpMsg=`📚 *Panduan Penggunaan Bot Toko*\n\n• Tambah / Hapus Produk\n• Tambah / Hapus Transaksi\n• Cetak / Kirim Ulang Nota (PDF)\n• Lihat Produk & Transaksi`; return bot.sendMessage(chatId,helpMsg,{ parse_mode:'Markdown', ...mainMenu }); }
     if (data === 'back_to_menu') { delete userState[chatId]; return bot.sendMessage(chatId,'🏠 *Menu Utama*',{ parse_mode:'Markdown', ...mainMenu }); }
   } catch (err) {
     console.error('Callback error:', err);
@@ -327,4 +351,20 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Handler menu kurangi produk
+// Handler error global untuk mencegah crash
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Bot stopping...');
+  botActive = false;
+  setTimeout(() => process.exit(0), 1000);
+});
+
+console.log('🚀 Bot sudah aktif dan siap digunakan!');
