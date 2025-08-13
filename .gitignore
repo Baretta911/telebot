@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+
+# Database & generated data
+db.json
+*.sqlite
+data/
+backup/
+
+# Logs & runtime artifacts
+out.log
+*.log
+nohup.out
+logs/
+
+# Temp / cache
+.tmp/
+temp/
+.cache/
+
+# Image / nota sementara
+nota_lala_*.jpg
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Package managers
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
