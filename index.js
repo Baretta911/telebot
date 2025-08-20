@@ -181,13 +181,29 @@ function generateNotaPDF(t, idx) {
   });
 }
 
+// Helper untuk menormalisasi produk (fallback name/price)
+function getProductDisplay(p, idx) {
+  const name = p && p.name ? String(p.name) : `Produk #${idx + 1}`;
+  let price = 0;
+  if (p && typeof p.price === 'number') price = p.price;
+  else if (p && p.price != null && !isNaN(parseInt(p.price))) price = parseInt(p.price);
+  return { name, price };
+}
+
 bot.on('callback_query', async (query) => {
   try {
     const chatId = query.message?.chat?.id;
     const data = query.data;
     if (!chatId || !botActive) return;
+
+    // jawab callback agar loading icon hilang di UI
+    try { await bot.answerCallbackQuery(query.id).catch(()=>{}); } catch(e){}
+
+    // pastikan userState terinisialisasi
+    userState[chatId] = userState[chatId] || { action: null, step: 0, transaction: { items: [] }, lastActive: Date.now() };
     if (userState[chatId]) userState[chatId].lastActive = Date.now();
     await db.read();
+
     // === Cetak nota (print_trans_) ===
     if (data.startsWith('print_trans_')) {
       const idx = parseInt(data.split('_')[2]);
@@ -197,7 +213,7 @@ bot.on('callback_query', async (query) => {
       try {
         const filePath = await generateNotaPDF(t, idx);
         await bot.sendDocument(chatId, filePath, { caption:`✅ Nota Transaksi #${idx+1}\nTotal: Rp${(t.total||0).toLocaleString('id-ID')}` });
-        fs.unlinkSync(filePath); // hapus file setelah dikirim
+        try { fs.unlinkSync(filePath); } catch(e){ console.warn('Gagal hapus file nota:', filePath, e?.message); }
       } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota PDF.'); }
       finally { if (phId) { try { await bot.deleteMessage(chatId,phId);} catch{} } }
       return;
@@ -211,29 +227,34 @@ bot.on('callback_query', async (query) => {
       try {
         const filePath = await generateNotaPDF(t, idx);
         await bot.sendDocument(chatId, filePath, { caption:`🖼️ Nota LALA SNACK #${idx+1}` });
-        fs.unlinkSync(filePath);
+        try { fs.unlinkSync(filePath); } catch(e){ console.warn('Gagal hapus file nota:', filePath, e?.message); }
       } catch(e){ console.error('Render nota gagal:',e); await bot.sendMessage(chatId,'❌ Gagal membuat nota PDF.'); }
       finally { if (phId) { try { await bot.deleteMessage(chatId,phId);} catch{} } }
       return;
     }
+
     // === Pilih transaksi (daftar) ===
     if (data === 'print_transactions') {
       if (db.data.transactions.length === 0) return bot.sendMessage(chatId,'📄 *Tidak ada transaksi untuk dicetak*',{ parse_mode:'Markdown', ...mainMenu });
       const buttons = db.data.transactions.map((t,i)=>[{ text:`📄 Cetak Transaksi #${i+1}`, callback_data:`print_trans_${i}`},{ text:'🔄 Kirim Ulang Nota', callback_data:`resend_pdf_trans_${i}` }]);
       buttons.push([{ text:'🔙 Kembali ke Menu', callback_data:'back_to_menu'}]);
-      const list = db.data.transactions.map((t,i)=> t.items? `${i+1}. *${t.items.map(it=>`${it.name} x${it.qty}`).join(', ')}*\n   💰 Total: Rp${t.total.toLocaleString('id-ID')} | 👤 ${t.buyer}` : `${i+1}. *${t.product} x${t.qty}*\n   👤 ${t.buyer}`).join('\n\n');
+      const list = db.data.transactions.map((t, i) =>
+        t.items
+          ? `${i + 1}. *${t.items.map(it => `${it.name} x${it.qty}`).join(', ')}*\n   💰 Total: Rp${t.total.toLocaleString('id-ID')} | 👤 ${t.buyer}`
+          : `${i + 1}. *${t.product} x${t.qty}*\n   👤 ${t.buyer}`
+      ).join('\n\n');
       bot.sendMessage(chatId,`📄 *Cetak / Kirim Ulang Nota*\n\n${list}`,{ parse_mode:'Markdown', reply_markup: { inline_keyboard: buttons }});
       return;
     }
     // === Produk ===
     if (data === 'add_product') { userState[chatId]={ action:'add_product', step:1, temp:{} }; return bot.sendMessage(chatId,'📦 *Tambah Produk Baru*\n\nMasukkan nama produk:',{ parse_mode:'Markdown' }); }
     if (data === 'delete_product') {
-      if (db.data.products.length===0) return bot.sendMessage(chatId,'❌ *Tidak ada produk untuk dihapus.*',{ parse_mode:'Markdown', ...mainMenu });
-      const buttons = db.data.products.map((p,i)=>[{ text:`🗑️ ${p.name} - Rp${p.price}`, callback_data:'delprod_'+i }]);
+      if ((db.data.products || []).length===0) return bot.sendMessage(chatId,'❌ *Tidak ada produk untuk dihapus.*',{ parse_mode:'Markdown', ...mainMenu });
+      const buttons = (db.data.products || []).map((p,i)=>{ const pd=getProductDisplay(p,i); return [{ text:`🗑️ ${pd.name} - Rp${pd.price}`, callback_data:'delprod_'+i }]; });
       buttons.push([{ text:'🔙 Kembali ke Menu', callback_data:'back_to_menu'}]);
       return bot.sendMessage(chatId,'🗑️ *Hapus Produk*\n\nPilih produk:',{ parse_mode:'Markdown', reply_markup:{ inline_keyboard: buttons }});
     }
-    if (data.startsWith('delprod_')) { const idx=parseInt(data.split('_')[1]); const prod=db.data.products[idx]; db.data.products.splice(idx,1); await db.write(); return bot.sendMessage(chatId,`✅ *Produk Dihapus*\n\n${prod.name}`,{ parse_mode:'Markdown', ...mainMenu }); }
+    if (data.startsWith('delprod_')) { const idx=parseInt(data.split('_')[1]); const prod=db.data.products[idx]; db.data.products.splice(idx,1); await db.write(); return bot.sendMessage(chatId,`✅ *Produk Dihapus*\n\n${getProductDisplay(prod,idx).name}`,{ parse_mode:'Markdown', ...mainMenu }); }
     // === Transaksi ===
     if (data === 'delete_transaction') {
       if (db.data.transactions.length===0) return bot.sendMessage(chatId,'❌ *Tidak ada transaksi untuk dihapus.*',{ parse_mode:'Markdown', ...mainMenu });
@@ -243,32 +264,187 @@ bot.on('callback_query', async (query) => {
     }
     if (data.startsWith('deltrans_')) { const idx=parseInt(data.split('_')[1]); db.data.transactions.splice(idx,1); await db.write(); return bot.sendMessage(chatId,`✅ *Transaksi Dihapus* #${idx+1}`,{ parse_mode:'Markdown', ...mainMenu }); }
     if (data === 'add_transaction') {
-      if (db.data.products.length===0) return bot.sendMessage(chatId,'❌ *Tidak ada produk tersedia*',{ parse_mode:'Markdown', ...mainMenu });
+      if ((db.data.products || []).length===0) return bot.sendMessage(chatId,'❌ *Tidak ada produk tersedia*',{ parse_mode:'Markdown', ...mainMenu });
       userState[chatId]={ action:'add_transaction', step:0, transaction:{ items:[] } };
-      const buttons = db.data.products.map((p,i)=>[{ text:`🛒 ${p.name} - Rp${p.price.toLocaleString('id-ID')}`, callback_data:'chooseprod_'+i }]);
-      buttons.push([{ text:'🔙 Kembali ke Menu', callback_data:'back_to_menu'}]);
-      return bot.sendMessage(chatId,'🛒 *Tambah Transaksi Baru*\n\nPilih produk:',{ parse_mode:'Markdown', reply_markup:{ inline_keyboard: buttons }});
+
+      if (db.data.products.length > 10) {
+        // Jika produk banyak, tampilkan filter + search
+        const buttons = [
+          [{ text: '🔍 Cari Produk', callback_data: 'search_transaction_products' }],
+          [{ text: '🔤 A-F', callback_data: 'select_products_AF' }, { text: '🔤 G-L', callback_data: 'select_products_GL' }],
+          [{ text: '🔤 M-R', callback_data: 'select_products_MR' }, { text: '🔤 S-Z', callback_data: 'select_products_SZ' }],
+          [{ text: '📋 Semua Produk', callback_data: 'select_products_ALL' }],
+          [{ text: '🔙 Kembali ke Menu', callback_data: 'back_to_menu' }]
+        ];
+        return bot.sendMessage(chatId, '🛒 *Tambah Transaksi Baru*\n\nPilih cara memilih produk:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+      } else {
+        // Jika produk sedikit, tampilkan langsung
+        const buttons = (db.data.products || []).map((p, i) => { const pd=getProductDisplay(p,i); return [{ text: `🛒 ${pd.name} - Rp${pd.price.toLocaleString('id-ID')}`, callback_data: 'chooseprod_' + i }]; });
+        buttons.push([{ text: '🔙 Kembali ke Menu', callback_data: 'back_to_menu' }]);
+        return bot.sendMessage(chatId, '🛒 *Tambah Transaksi Baru*\n\nPilih produk:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+      }
     }
-    if (data.startsWith('chooseprod_')) { 
-      const idx=parseInt(data.split('_')[1]); 
-      const prod=db.data.products[idx]; 
-      if(!prod) return bot.sendMessage(chatId,'❌ Produk tidak ditemukan.');
-      if(!userState[chatId] || userState[chatId].action!=='add_transaction') { userState[chatId]={ action:'add_transaction', step:0, transaction:{ items:[] } }; }
-      userState[chatId].step=1; 
-      userState[chatId].selectedProduct={ idx, name:prod.name, price:prod.price }; 
-      return bot.sendMessage(chatId,`🔢 *Input Jumlah*\n\n${safeMarkdown(prod.name)} (Rp${prod.price.toLocaleString('id-ID')}/pcs)`,{ parse_mode:'Markdown' }); 
+
+    // Handler untuk pencarian produk saat transaksi
+    if (data === 'search_transaction_products') {
+      userState[chatId] = userState[chatId] || { action: null, lastActive: Date.now() };
+      userState[chatId].search_for_transaction = true;
+      userState[chatId].action = 'search_products';
+      userState[chatId].step = 1;
+      return bot.sendMessage(chatId, '🔍 *Cari Produk untuk Transaksi*\n\nKetik nama produk yang ingin dicari:\n\nContoh: `brondong`, `abon`, `bakpia`, dll.', { parse_mode: 'Markdown' });
     }
-    if (data === 'add_more_product') { userState[chatId].step=0; const buttons=db.data.products.map((p,i)=>[{ text:`🛒 ${p.name} - Rp${p.price.toLocaleString('id-ID')}`, callback_data:'chooseprod_'+i }]); buttons.push([{ text:'✅ Selesai & Checkout', callback_data:'checkout_transaction'}]); return bot.sendMessage(chatId,'🛒 *Tambah Produk Lagi*',{ parse_mode:'Markdown', reply_markup:{ inline_keyboard: buttons }}); }
-    if (data === 'checkout_transaction') { if(!userState[chatId]) return bot.sendMessage(chatId,'❌ Transaksi tidak valid',{ parse_mode:'Markdown', ...mainMenu }); userState[chatId].step=2; return bot.sendMessage(chatId,'👤 *Data Pembeli*\n\nMasukkan nama pembeli:',{ parse_mode:'Markdown' }); }
-    // === Kurangi produk dalam transaksi aktif ===
-    if (data === 'remove_product_menu') { const state=userState[chatId]; if(!state||!state.transaction.items.length) return bot.sendMessage(chatId,'❌ Tidak ada produk yang bisa dikurangi.',{ parse_mode:'Markdown' }); const buttons=state.transaction.items.map((it,i)=>[{ text:`➖ ${it.name} x${it.qty}`, callback_data:'remove_product_'+i }]); buttons.push([{ text:'🔙 Kembali', callback_data:'back_to_summary'}]); return bot.sendMessage(chatId,'Pilih produk yang dihapus:',{ reply_markup:{ inline_keyboard: buttons }}); }
-    if (data.startsWith('remove_product_')) { const idx=parseInt(data.split('_')[2]); const state=userState[chatId]; if(!state||!state.transaction.items[idx]) return bot.sendMessage(chatId,'❌ Produk tidak ditemukan.',{ parse_mode:'Markdown' }); state.transaction.items.splice(idx,1); const summary=state.transaction.items.map((it,i)=>`${i+1}. *${it.name}* x${it.qty} = Rp${it.subtotal.toLocaleString('id-ID')}`).join('\n')||'-'; const total=state.transaction.items.reduce((a,b)=>a+b.subtotal,0); const buttons=[[{ text:'➕ Tambah Produk', callback_data:'add_more_product'}],[{ text:'➖ Kurangi Produk', callback_data:'remove_product_menu'}],[{ text:'✅ Checkout Sekarang', callback_data:'checkout_transaction'}]]; return bot.sendMessage(chatId,`📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*`,{ parse_mode:'Markdown', reply_markup:{ inline_keyboard: buttons }}); }
-    if (data === 'back_to_summary') { const state=userState[chatId]; if(!state) return; const summary=state.transaction.items.map((it,i)=>`${i+1}. *${it.name}* x${it.qty} = Rp${it.subtotal.toLocaleString('id-ID')}`).join('\n'); const total=state.transaction.items.reduce((a,b)=>a+b.subtotal,0); const buttons=[[{ text:'➕ Tambah Produk', callback_data:'add_more_product'}],[{ text:'➖ Kurangi Produk', callback_data:'remove_product_menu'}],[{ text:'✅ Checkout Sekarang', callback_data:'checkout_transaction'}]]; return bot.sendMessage(chatId,`📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*`,{ parse_mode:'Markdown', reply_markup:{ inline_keyboard: buttons }}); }
-    // === Lihat produk / transaksi / bantuan / kembali ===
-    if (data === 'view_products') { const products=db.data.products; if(!products.length) return bot.sendMessage(chatId,'📦 *Daftar Produk Kosong*',{ parse_mode:'Markdown', ...mainMenu }); const list=products.map((p,i)=>`${i+1}. *${p.name}* - Rp${p.price.toLocaleString('id-ID')}`).join('\n'); return bot.sendMessage(chatId,`📦 *Daftar Produk* (${products.length})\n\n${list}`,{ parse_mode:'Markdown', ...mainMenu }); }
-    if (data === 'view_transactions') { const trans=db.data.transactions; if(!trans.length) return bot.sendMessage(chatId,'📊 *Daftar Transaksi Kosong*',{ parse_mode:'Markdown', ...mainMenu }); const list=trans.map((t,i)=> t.items? `${i+1}. *${t.items.map(it=>`${it.name} x${it.qty}`).join(', ')}*\n   💰 Total: Rp${t.total.toLocaleString('id-ID')} | 👤 ${t.buyer}` : `${i+1}. *${t.product} x${t.qty}*\n   👤 ${t.buyer}`).join('\n\n'); return bot.sendMessage(chatId,`📊 *Daftar Transaksi* (${trans.length})\n\n${list}`,{ parse_mode:'Markdown', ...mainMenu }); }
-    if (data === 'help') { const helpMsg=`📚 *Panduan Penggunaan Bot Toko*\n\n• Tambah / Hapus Produk\n• Tambah / Hapus Transaksi\n• Cetak / Kirim Ulang Nota (PDF)\n• Lihat Produk & Transaksi`; return bot.sendMessage(chatId,helpMsg,{ parse_mode:'Markdown', ...mainMenu }); }
-    if (data === 'back_to_menu') { delete userState[chatId]; return bot.sendMessage(chatId,'🏠 *Menu Utama*',{ parse_mode:'Markdown', ...mainMenu }); }
+
+    // Handler filter produk untuk pemilihan transaksi
+    if (data.startsWith('select_products_')) {
+      const filter = data.split('_')[2];
+      const products = db.data.products || [];
+
+      // Buat list dengan indeks asli
+      const indexed = products.map((p, i) => ({ item: p || {}, idx: i }));
+
+      let filteredIndexed = [];
+      let filterTitle = '';
+
+      switch (filter) {
+        case 'AF':
+          filteredIndexed = indexed.filter(e => (e.item.name || '').match(/^[A-Fa-f]/));
+          filterTitle = 'A-F';
+          break;
+        case 'GL':
+          filteredIndexed = indexed.filter(e => (e.item.name || '').match(/^[G-Lg-l]/));
+          filterTitle = 'G-L';
+          break;
+        case 'MR':
+          filteredIndexed = indexed.filter(e => (e.item.name || '').match(/^[M-Rm-r]/));
+          filterTitle = 'M-R';
+          break;
+        case 'SZ':
+          filteredIndexed = indexed.filter(e => (e.item.name || '').match(/^[S-Zs-z]/));
+          filterTitle = 'S-Z';
+          break;
+        case 'ALL':
+          filteredIndexed = indexed.slice();
+          filterTitle = 'Semua';
+          break;
+        default:
+          filteredIndexed = indexed.slice();
+          filterTitle = 'Semua';
+      }
+
+      if (!filteredIndexed.length) {
+        const backButtons = [[{ text: '🔙 Kembali ke Filter', callback_data: 'add_transaction' }]];
+        return bot.sendMessage(chatId, `🛒 *Produk ${filterTitle}*\n\n❌ Tidak ada produk dengan huruf awal ${filterTitle}`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: backButtons } });
+      }
+
+      // Urutkan berdasarkan nama produk (handle nama kosong)
+      filteredIndexed.sort((a, b) => (a.item.name || '').localeCompare(b.item.name || ''));
+
+      // Buat tombol menggunakan indeks asli (e.idx)
+      const buttons = filteredIndexed.map(e => {
+        const pd = getProductDisplay(e.item, e.idx);
+        return [{ text: `🛒 ${pd.name} - Rp${pd.price.toLocaleString('id-ID')}`, callback_data: 'chooseprod_' + e.idx }];
+      });
+
+      buttons.push([{ text: '🔙 Kembali ke Filter', callback_data: 'add_transaction' }]);
+
+      return bot.sendMessage(chatId, `🛒 *Pilih Produk ${filterTitle}* (${filteredIndexed.length}/${products.length})\n\nPilih produk:`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    // Handler ketika memilih produk dari daftar (termasuk hasil filter)
+    if (data.startsWith('chooseprod_')) {
+      const idx = parseInt(data.split('_')[1]);
+      const prod = db.data.products[idx];
+      if (!prod) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+      if (!userState[chatId] || userState[chatId].action !== 'add_transaction') {
+        userState[chatId] = { action: 'add_transaction', step: 0, transaction: { items: [] } };
+      }
+      userState[chatId].step = 1;
+      const pd = getProductDisplay(prod, idx);
+      userState[chatId].selectedProduct = { idx, name: pd.name, price: pd.price };
+      console.log(`chat ${chatId} - pilih produk: idx=${idx} name=${pd.name} price=${pd.price}`);
+      await bot.sendMessage(chatId, `🔢 *Input Jumlah*\n\n${safeMarkdown(pd.name)} (Rp${pd.price.toLocaleString('id-ID')}/pcs)`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    // Tambah produk lagi (dari ringkasan) - tampilkan filter / daftar produk
+    if (data === 'add_more_product') {
+      const state = userState[chatId];
+      console.log(`chat ${chatId} - add_more_product`);
+      if (!state || state.action !== 'add_transaction') return bot.sendMessage(chatId, '❌ Tidak ada transaksi aktif.', { parse_mode: 'Markdown', ...mainMenu });
+      state.step = 0; // kembali ke langkah pilih produk
+
+      if ((db.data.products || []).length > 10) {
+        const buttons = [
+          [{ text: '🔍 Cari Produk', callback_data: 'search_transaction_products' }],
+          [{ text: '🔤 A-F', callback_data: 'select_products_AF' }, { text: '🔤 G-L', callback_data: 'select_products_GL' }],
+          [{ text: '🔤 M-R', callback_data: 'select_products_MR' }, { text: '🔤 S-Z', callback_data: 'select_products_SZ' }],
+          [{ text: '📋 Semua Produk', callback_data: 'select_products_ALL' }],
+          [{ text: '🔙 Kembali ke Ringkasan', callback_data: 'back_to_summary' }]
+        ];
+        return bot.sendMessage(chatId, '🛒 *Tambah Produk Lagi*\n\nPilih cara memilih produk:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+      }
+
+      const buttons = (db.data.products || []).map((p, i) => { const pd=getProductDisplay(p,i); return [{ text: `🛒 ${pd.name} - Rp${pd.price.toLocaleString('id-ID')}`, callback_data: 'chooseprod_' + i }]; });
+      buttons.push([{ text: '🔙 Kembali ke Ringkasan', callback_data: 'back_to_summary' }]);
+      return bot.sendMessage(chatId, '🛒 *Tambah Produk Lagi*\n\nPilih produk:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    // Handler kurangi produk dari ringkasan
+    if (data === 'remove_product_menu') {
+      const state = userState[chatId];
+      if (!state || state.action !== 'add_transaction' || !state.transaction.items.length) {
+        return bot.sendMessage(chatId, '❌ Tidak ada produk yang bisa dikurangi.', { parse_mode: 'Markdown', ...mainMenu });
+      }
+      const buttons = state.transaction.items.map((it, i) => [{ text: `➖ ${it.name} x${it.qty}`, callback_data: 'remove_product_' + i }]);
+      buttons.push([{ text: '🔙 Kembali', callback_data: 'back_to_summary' }]);
+      return bot.sendMessage(chatId, 'Pilih produk yang akan dikurangi / hapus:', { reply_markup: { inline_keyboard: buttons } });
+    }
+
+    if (data.startsWith('remove_product_')) {
+      const idx = parseInt(data.split('_')[2]);
+      const state = userState[chatId];
+      if (!state || state.action !== 'add_transaction' || !state.transaction.items[idx]) {
+        return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.', { parse_mode: 'Markdown' });
+      }
+      console.log(`chat ${chatId} - remove product idx=${idx} name=${state.transaction.items[idx].name}`);
+      state.transaction.items.splice(idx, 1);
+
+      // jika tidak ada item tersisa, kembalikan ke menu utama
+      if (!state.transaction.items.length) {
+        delete userState[chatId];
+        return bot.sendMessage(chatId, '✅ Semua produk dihapus. Transaksi dibatalkan.', { parse_mode: 'Markdown', ...mainMenu });
+      }
+
+      const summary = state.transaction.items.map((it, i) => `${i + 1}. *${safeMarkdown(it.name)}* x${it.qty} = Rp${it.subtotal.toLocaleString('id-ID')}`).join('\n');
+      const total = state.transaction.items.reduce((a, b) => a + b.subtotal, 0);
+      const buttons = [
+        [{ text: '➕ Tambah Produk', callback_data: 'add_more_product' }],
+        [{ text: '➖ Kurangi Produk', callback_data: 'remove_product_menu' }],
+        [{ text: '✅ Checkout Sekarang', callback_data: 'checkout_transaction' }]
+      ];
+      return bot.sendMessage(chatId, `📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    if (data === 'back_to_summary') {
+      const state = userState[chatId];
+      if (!state || state.action !== 'add_transaction') return bot.sendMessage(chatId, '❌ Tidak ada transaksi aktif.', { parse_mode: 'Markdown', ...mainMenu });
+      const summary = state.transaction.items.map((it, i) => `${i + 1}. *${safeMarkdown(it.name)}* x${it.qty} = Rp${it.subtotal.toLocaleString('id-ID')}`).join('\n') || '-';
+      const total = state.transaction.items.reduce((a, b) => a + b.subtotal, 0);
+      const buttons = [
+        [{ text: '➕ Tambah Produk', callback_data: 'add_more_product' }],
+        [{ text: '➖ Kurangi Produk', callback_data: 'remove_product_menu' }],
+        [{ text: '✅ Checkout Sekarang', callback_data: 'checkout_transaction' }]
+      ];
+      return bot.sendMessage(chatId, `📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    if (data === 'checkout_transaction') {
+      if (!userState[chatId] || userState[chatId].action !== 'add_transaction') return bot.sendMessage(chatId, '❌ Tidak ada transaksi aktif.', { parse_mode: 'Markdown', ...mainMenu });
+      userState[chatId].step = 2;
+      console.log(`chat ${chatId} - checkout start`);
+      return bot.sendMessage(chatId, '👤 *Data Pembeli*\n\nMasukkan nama pembeli:', { parse_mode: 'Markdown' });
+    }
+
   } catch (err) {
     console.error('Callback error:', err);
     try { await bot.sendMessage(query.message?.chat?.id || query.from?.id, '❌ Terjadi kesalahan memproses.'); } catch(e){}
@@ -310,61 +486,123 @@ bot.on('message', async (msg) => {
       if (state.step === 1) {
         const qty = parseInt(msg.text);
         if (isNaN(qty) || qty <= 0) {
-          bot.sendMessage(chatId, '❌ *Jumlah tidak valid*\n\nMasukkan angka positif untuk jumlah produk.', { parse_mode: 'Markdown' });
-          return;
+          return bot.sendMessage(chatId, '❌ *Jumlah tidak valid*\n\nMasukkan angka positif untuk jumlah produk.', { parse_mode: 'Markdown' });
         }
-        const prod = userState[chatId].selectedProduct;
-        if(!prod) {
+
+        const prod = userState[chatId]?.selectedProduct;
+        if (!prod) {
           state.step = 0;
-          return bot.sendMessage(chatId,'⚠️ Produk tidak tersedia, pilih ulang.',{ parse_mode:'Markdown' });
+          return bot.sendMessage(chatId, '⚠️ Produk tidak tersedia, pilih ulang.', { parse_mode: 'Markdown' });
         }
-        state.transaction.items.push({ name: prod.name, price: prod.price, qty, subtotal: prod.price * qty });
+
+        console.log(`chat ${chatId} - add qty ${qty} to product idx=${prod.idx} name=${prod.name}`);
+        state.transaction.items.push({
+          name: prod.name,
+          price: prod.price,
+          qty,
+          subtotal: prod.price * qty
+        });
+
         delete userState[chatId].selectedProduct;
+
         // Tampilkan ringkasan transaksi dengan tombol tambah, kurangi, checkout
-        let summary = state.transaction.items.map((item, i) => `${i + 1}. *${safeMarkdown(item.name)}* x${item.qty} = Rp${item.subtotal.toLocaleString('id-ID')}`).join('\n');
-        let total = state.transaction.items.reduce((a, b) => a + b.subtotal, 0);
+        const summary = state.transaction.items
+          .map((item, i) => `${i + 1}. *${safeMarkdown(item.name)}* x${item.qty} = Rp${item.subtotal.toLocaleString('id-ID')}`)
+          .join('\n');
+
+        const total = state.transaction.items.reduce((a, b) => a + b.subtotal, 0);
+
         const buttons = [
           [{ text: '➕ Tambah Produk', callback_data: 'add_more_product' }],
           [{ text: '➖ Kurangi Produk', callback_data: 'remove_product_menu' }],
           [{ text: '✅ Checkout Sekarang', callback_data: 'checkout_transaction' }]
         ];
-        bot.sendMessage(chatId, `📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*\n\nPilih aksi berikut:`, {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: buttons }
-        });
+
+        return bot.sendMessage(
+          chatId,
+          `📋 *Ringkasan Transaksi:*\n${summary}\n\n💰 *Subtotal: Rp${total.toLocaleString('id-ID')}*\n\nPilih aksi berikut:`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: buttons }
+          }
+        );
       } else if (state.step === 2) {
         state.transaction.buyer = msg.text;
         state.transaction.total = state.transaction.items.reduce((a, b) => a + b.subtotal, 0);
         state.transaction.timestamp = new Date().toISOString();
+
         db.data.transactions.push(state.transaction);
         await db.write();
-        
-        let summary = state.transaction.items.map((item, i) => `${i + 1}. *${safeMarkdown(item.name)}* x${item.qty} (Rp${item.price.toLocaleString('id-ID')}/pcs) = Rp${item.subtotal.toLocaleString('id-ID')}`).join('\n');
-        bot.sendMessage(chatId, `🎉 *Transaksi Berhasil!*\n\n📋 *Detail Transaksi:*\n${summary}\n\n💰 *Total: Rp${state.transaction.total.toLocaleString('id-ID')}*\n👤 *Pembeli: ${safeMarkdown(state.transaction.buyer)}*\n📅 *Tanggal: ${new Date().toLocaleDateString('id-ID')}*`, { parse_mode: 'Markdown', ...mainMenu });
+
+        const summary = state.transaction.items
+          .map((item, i) => `${i + 1}. *${safeMarkdown(item.name)}* x${item.qty} (Rp${item.price.toLocaleString('id-ID')}/pcs) = Rp${item.subtotal.toLocaleString('id-ID')}`)
+          .join('\n');
+
+        console.log(`chat ${chatId} - transaksi selesai total=${state.transaction.total} buyer=${state.transaction.buyer}`);
+        bot.sendMessage(
+          chatId,
+          `🎉 *Transaksi Berhasil!*\n\n📋 *Detail Transaksi:*\n${summary}\n\n💰 *Total: Rp${state.transaction.total.toLocaleString('id-ID')}*\n👤 *Pembeli: ${safeMarkdown(state.transaction.buyer)}*\n📅 *Tanggal: ${new Date().toLocaleDateString('id-ID')}*`,
+          { parse_mode: 'Markdown', ...mainMenu }
+        );
+
         delete userState[chatId];
       }
-      return;
     }
+
+    // Handler pencarian produk (dipicu setelah menekan cari dan memasukkan kata)
+    if (state.action === 'search_products') {
+      if (state.step === 1) {
+        const searchTerm = (msg.text || '').toLowerCase().trim();
+        if (searchTerm.length < 2) {
+          return bot.sendMessage(chatId, '❌ *Kata pencarian terlalu pendek*\n\nMinimal 2 karakter. Coba lagi:', { parse_mode: 'Markdown' });
+        }
+
+        // kumpulkan indeks produk yang cocok
+        const matchedIndices = [];
+        (db.data.products || []).forEach((p, i) => {
+          if ((p.name || '').toLowerCase().includes(searchTerm)) matchedIndices.push(i);
+        });
+
+        if (!matchedIndices.length) {
+          const buttons = [[{ text: '🔄 Cari Lagi', callback_data: state.search_for_transaction ? 'search_transaction_products' : 'search_products' }, { text: '🔙 Kembali', callback_data: state.search_for_transaction ? 'add_transaction' : 'view_products' }]];
+          return bot.sendMessage(chatId, `🔍 *Hasil Pencarian: "${safeMarkdown(searchTerm)}"*\n\n❌ Tidak ditemukan produk yang cocok.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+        }
+
+        // Jika untuk transaksi, tampilkan tombol yang bisa dipilih
+        if (state.search_for_transaction) {
+          // pastikan kita tetap menyimpan transaksi yang sedang berjalan
+          const currentTrans = userState[chatId].transaction || { items: [] };
+          userState[chatId] = { action: 'add_transaction', step: 0, transaction: currentTrans };
+
+          const buttons = matchedIndices.map(i => {
+            const p = db.data.products[i];
+            const pd = getProductDisplay(p,i);
+            return [{ text: `🛒 ${pd.name} - Rp${(pd.price||0).toLocaleString('id-ID')}`, callback_data: 'chooseprod_' + i }];
+          });
+          buttons.push([{ text: '🔄 Cari Lagi', callback_data: 'search_transaction_products' }]);
+          buttons.push([{ text: '🔙 Kembali', callback_data: 'add_transaction' }]);
+
+          return bot.sendMessage(chatId, `🔍 *Hasil Pencarian: "${safeMarkdown(searchTerm)}"*\n\nDitemukan ${matchedIndices.length} produk:\n\nPilih produk untuk transaksi:`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+        }
+
+        // Untuk view_products -> tampilkan list saja
+        const list = matchedIndices.map((i, idx) => {
+          const p = db.data.products[i];
+          const pd = getProductDisplay(p,i);
+          return `${idx + 1}. *${safeMarkdown(pd.name)}* - Rp${(pd.price||0).toLocaleString('id-ID')}`;
+        }).join('\n');
+
+        const buttons = [[{ text: '🔄 Cari Lagi', callback_data: 'search_products' }],[{ text: '🔙 Kembali', callback_data: 'view_products' }]];
+        return bot.sendMessage(chatId, `🔍 *Hasil Pencarian: "${safeMarkdown(searchTerm)}"*\n\nDitemukan ${matchedIndices.length} produk:\n\n${list}`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+      }
+    }
+
   } catch (err) {
-    console.error('Error on message:', err);
-    try { await bot.sendMessage(msg.chat.id, '❌ Terjadi kesalahan memproses pesan Anda.'); } catch(e){}
+    console.error('Error message:', err);
   }
 });
 
-// Handler error global untuk mencegah crash
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('Bot stopping...');
-  botActive = false;
-  setTimeout(() => process.exit(0), 1000);
-});
-
-console.log('🚀 Bot sudah aktif dan siap digunakan!');
+// Global error handlers + graceful shutdown
+process.on('uncaughtException', (err) => { console.error('Uncaught Exception:', err); });
+process.on('unhandledRejection', (err) => { console.error('Unhandled Rejection:', err); });
+process.on('SIGINT', () => { console.log('SIGINT received, shutting down...'); botActive = false; try { bot.stopPolling(); } catch(e){} setTimeout(()=>process.exit(0),500); });
