@@ -445,6 +445,46 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, '👤 *Data Pembeli*\n\nMasukkan nama pembeli:', { parse_mode: 'Markdown' });
     }
 
+    // Tampilkan daftar produk (lihat produk) dengan tombol kembali yang sesuai
+    if (data === 'view_products') {
+      const products = db.data.products || [];
+      if (!products.length) return bot.sendMessage(chatId, '📋 *Daftar Produk*\n\n❌ Tidak ada produk.', { parse_mode: 'Markdown', ...mainMenu });
+
+      const buttons = products.map((p, i) => {
+        const pd = getProductDisplay(p, i);
+        // Jika sedang dalam alur tambah transaksi, tombol pilih akan langsung memilih produk
+        if (userState[chatId] && userState[chatId].action === 'add_transaction') {
+          return [{ text: `🛒 ${pd.name} - Rp${pd.price.toLocaleString('id-ID')}`, callback_data: 'chooseprod_' + i }];
+        }
+        // Otherwise show detail view
+        return [{ text: `📦 ${pd.name} - Rp${pd.price.toLocaleString('id-ID')}`, callback_data: 'viewprod_' + i }];
+      });
+
+      // tombol kembali kontekstual
+      if (userState[chatId] && userState[chatId].action === 'add_transaction') {
+        buttons.push([{ text: '🔙 Kembali ke Transaksi', callback_data: 'add_transaction' }]);
+      } else {
+        buttons.push([{ text: '🔙 Kembali ke Menu', callback_data: 'back_to_menu' }]);
+      }
+
+      return bot.sendMessage(chatId, `📋 *Daftar Produk* (${products.length})\n\nPilih produk:`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    // Lihat detail produk (non-transaksi)
+    if (data.startsWith('viewprod_')) {
+      const idx = parseInt(data.split('_')[1]);
+      const p = db.data.products[idx];
+      if (!p) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+      const pd = getProductDisplay(p, idx);
+      const buttons = [[{ text: '🔙 Kembali ke Daftar', callback_data: 'view_products' }, { text: '🔙 Kembali ke Menu', callback_data: 'back_to_menu' }]];
+      return bot.sendMessage(chatId, `📦 *${safeMarkdown(pd.name)}*\n\n💰 Harga: Rp${pd.price.toLocaleString('id-ID')}`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    // Kembali ke menu utama
+    if (data === 'back_to_menu') {
+      return bot.sendMessage(chatId, '🔙 Kembali ke Menu Utama', mainMenu);
+    }
+
   } catch (err) {
     console.error('Callback error:', err);
     try { await bot.sendMessage(query.message?.chat?.id || query.from?.id, '❌ Terjadi kesalahan memproses.'); } catch(e){}
